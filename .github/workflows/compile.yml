@@ -1,6 +1,6 @@
 name: NodeMCU 1.0 Build
 
-on: [push, workflow_dispatch] # Runs on every upload or manual start
+on: [push, workflow_dispatch]
 
 jobs:
   compile:
@@ -21,8 +21,8 @@ jobs:
 
       - name: Compile for NodeMCU 1.0
         run: |
-          # Replace "MyCode" with your actual folder name below
-          arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 --output-dir ./build ./MyCode
+          # This points to your 'aqua' folder
+          arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 --output-dir ./build ./aqua
 
       - name: Save .bin File
         uses: actions/upload-artifact@v4
