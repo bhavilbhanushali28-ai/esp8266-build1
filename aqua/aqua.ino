@@ -5170,6 +5170,7 @@ void broadcastStatus() {
   doc["maxRelayRuntime"] = settings.maxRelayRuntime;
   doc["relayOnStartTime"] = relayOnStartTime;
   doc["currentDeviceMillis"] = millis();
+  doc["currentRelayDuration"] = relayDuration; // For temporary run countdown 
   
 
   // Add human-readable WiFi status
