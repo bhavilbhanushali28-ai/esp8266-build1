@@ -19,9 +19,19 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp8266:esp8266
 
+      - name: Install Libraries
+        run: |
+          arduino-cli lib install "ArduinoJson"
+          arduino-cli lib install "NTPClient"
+          arduino-cli lib install "Time"
+          arduino-cli lib install "Ticker"
+          arduino-cli lib install "ESPAsyncTCP"
+          arduino-cli lib install "ESP Async WebServer"
+          arduino-cli lib install "ElegantOTA"
+          arduino-cli lib install "UniversalTelegramBot"
+
       - name: Compile for NodeMCU 1.0
         run: |
-          # This points to your 'aqua' folder
           arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 --output-dir ./build ./aqua
 
       - name: Save .bin File
