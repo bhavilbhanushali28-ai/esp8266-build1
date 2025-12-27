@@ -1843,6 +1843,16 @@ void setup() {
   remainingSleepSeconds = 0;
   Serial.println("RTC empty or invalid");
 }
+
+// 🔑 THIS BLOCK GOES HERE
+if (remainingSleepSeconds > 0) {
+  Serial.println("Mid-cycle wake → going back to sleep");
+  deepSleepRequested = true;
+  sleepRequestTime = 0;
+  return;   // ⬅️ EXACT PLACE
+}
+
+// Final wake only
 if (remainingSleepSeconds == 0) {
   clearRTC();
   Serial.println("Sleep cycle complete");
