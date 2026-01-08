@@ -14,5 +14,4 @@ const HardcodedNetwork hardcodedNetworks[] = {
     {"lenovo", "12345678"}
 };
 
-const size_t NUM_HARDCODED_NETWORKS = sizeof(hardcodedNetworks) / sizeof(hardcodedNetworks[0]);DED_NETWORKS = sizeof(hardcodedNetworks) / sizeof(hardcodedNetworks[0]);
-*/
+const size_t NUM_HARDCODED_NETWORKS = sizeof(hardcodedNetworks) / sizeof(hardcodedNetworks[0]);

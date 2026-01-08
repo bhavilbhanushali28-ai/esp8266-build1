@@ -3,7 +3,7 @@
 // Version: 2.2 - Fixed for ArduinoDroid compatibility
 // ============================================================
 
-#include "WiFiManager.h"  // This already includes WiFiConfig.h
+#include "WiFiManager.h"
 #include <ESP8266WiFi.h>
 
 // ===================== EXTERNAL REFERENCES =====================
@@ -11,9 +11,6 @@ extern struct Settings {
     char staSsid[33];
     char staPassword[65];
 } settings;
-
-// hardcodedNetworks and NUM_HARDCODED_NETWORKS are declared in WiFiConfig.h
-// and defined in WiFiConfig.cpp
 
 extern bool wifiConnected;
 extern bool isApModeActive;
@@ -30,8 +27,6 @@ extern void checkAPTimeout(void);
 extern void syncTimeFromNTP(void);
 extern void saveSettings(void);
 
-// ... REST OF THE FILE STAYS THE SAME ...
-
 // ===================== MODULE VARIABLES =====================
 static WifiMgrContext ctx;
 static WifiMgrRTCData rtcWiFiData;
@@ -40,7 +35,6 @@ static WiFiEventHandler onConnectedHandler;
 static WiFiEventHandler onDisconnectedHandler;
 static WiFiEventHandler onGotIPHandler;
 
-// Telegram delay tracking
 static uint32_t telegramScheduledTime = 0;
 static bool telegramWaitingForDelay = false;
 static uint32_t connectionStableStartTime = 0;
@@ -100,7 +94,6 @@ static void saveConnectedCredentialsIfNew(void);
 static void scheduleTelegramSend(void);
 static void processTelegramDelay(uint32_t now);
 
-static void exitLightSleep(void);
 static void yieldSafe(uint32_t ms);
 
 static void loadRTCWiFiData(void);
@@ -113,8 +106,7 @@ static void heapSafeYield(void);
 
 // ===================== HEAP SAFETY FUNCTIONS =====================
 static bool isHeapSafe(uint32_t required) {
-    uint32_t freeHeap = ESP.getFreeHeap();
-    return freeHeap >= required;
+    return ESP.getFreeHeap() >= required;
 }
 
 static void heapSafeYield(void) {
@@ -1232,14 +1224,6 @@ static uint32_t calculateBackoffDelay(void) {
 }
 
 // ===================== UTILITY FUNCTIONS =====================
-static void exitLightSleep(void) {
-    Serial.println(F("Waking WiFi..."));
-    WiFi.forceSleepWake();
-    delay(100);
-    WiFi.mode(WIFI_STA);
-    delay(200);
-}
-
 static void yieldSafe(uint32_t ms) {
     if (ms > 0) {
         delay(ms);

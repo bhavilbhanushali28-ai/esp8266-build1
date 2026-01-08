@@ -8,7 +8,7 @@
 
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
-#include "WiFiConfig.h"  // Include for HardcodedNetwork struct
+#include "WiFiConfig.h"
 
 // ===================== CONFIGURATION DEFAULTS =====================
 
@@ -191,69 +191,40 @@ typedef struct {
 extern "C" {
 #endif
 
-// Initialization
 void initWiFiManager(void);
-
-// Main loop function
 void manageWiFiConnection(void);
 
-// State getters
 WifiMgrState getWiFiState(void);
 const char* getWiFiStateName(void);
 const char* getWiFiStateNameByState(WifiMgrState state);
 WifiMgrFailureType getLastFailureType(void);
 const char* getFailureTypeName(WifiMgrFailureType type);
 
-// Mode control
 void setWiFiOperationMode(WifiMgrOperationMode mode);
 WifiMgrOperationMode getWiFiOperationMode(void);
 void enableIntermittentHuntMode(void);
 void disableIntermittentHuntMode(void);
 bool isInHuntMode(void);
 
-// Connection status
 bool isWiFiConnected(void);
 uint32_t getTimeSinceLastConnection(void);
 uint32_t getTimeSinceTargetSeen(void);
 bool hasTargetBeenSeen(void);
 
-// Signal info
 int8_t getLastRSSI(void);
 int8_t getCurrentRSSI(void);
 
-// Statistics
 uint16_t getTotalScanCount(void);
 uint8_t getPoorSignalDisconnectCount(void);
 uint8_t getWrongPasswordCount(void);
 uint8_t getAuthFailureCount(void);
 
-// Control functions
 void resetWiFiManager(void);
 void resetFailureCounters(void);
 void forceAPMode(const char* reason);
 void exitAPModeAndResume(void);
 void setTargetSSID(const char* ssid);
 
-// Debug
-void printWiFiManagerStatus(void);
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif // WIFI_MANAGER_Hnt(void);
-uint8_t getPoorSignalDisconnectCount(void);
-uint8_t getWrongPasswordCount(void);
-uint8_t getAuthFailureCount(void);
-
-// Control functions
-void resetWiFiManager(void);
-void resetFailureCounters(void);
-void forceAPMode(const char* reason);
-void exitAPModeAndResume(void);
-void setTargetSSID(const char* ssid);
-
-// Debug
 void printWiFiManagerStatus(void);
 
 #ifdef __cplusplus
