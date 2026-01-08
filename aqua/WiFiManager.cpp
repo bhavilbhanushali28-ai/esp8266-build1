@@ -1,43 +1,19 @@
 // ============================================================
 // WiFiManager.cpp - Intermittent WiFi with Smart AP Fallback
-// Version: 2.1 - Fixed for ArduinoDroid compatibility
+// Version: 2.2 - Fixed for ArduinoDroid compatibility
 // ============================================================
 
-#include "WiFiManager.h"
+#include "WiFiManager.h"  // This already includes WiFiConfig.h
 #include <ESP8266WiFi.h>
-#include "WiFiConfig.h"
-// Remove the struct and array definitions from here
-/*
-// Hardcoded networks
-struct HardcodedNetwork {
-    const char* ssid;
-    const char* password;
-};
-const HardcodedNetwork hardcodedNetworks[] = {
-    {"realme 5g", "bhavil23!"},
-    {"ishwar", "12345689"}, // Example 2
-    {"note 5pro", "bhavil23!"},    // Example 3
-    {"lenovo", "12345678"}  
-};
-//const size_t NUM_HARDCODED_NETWORKS = sizeof(hardcodedNetworks) / sizeof(hardcodedNetworks[0]);
-
-const size_t NUM_HARDCODED_NETWORKS = sizeof(hardcodedNetworks) / sizeof(hardcodedNetworks[0]);
-*/
-
 
 // ===================== EXTERNAL REFERENCES =====================
 extern struct Settings {
     char staSsid[33];
     char staPassword[65];
 } settings;
-/*
-extern struct HardcodedNetwork {
-    const char* ssid;
-    const char* password;
-} hardcodedNetworks[];
-*/
 
-extern const size_t NUM_HARDCODED_NETWORKS;
+// hardcodedNetworks and NUM_HARDCODED_NETWORKS are declared in WiFiConfig.h
+// and defined in WiFiConfig.cpp
 
 extern bool wifiConnected;
 extern bool isApModeActive;
@@ -54,6 +30,8 @@ extern void checkAPTimeout(void);
 extern void syncTimeFromNTP(void);
 extern void saveSettings(void);
 
+// ... REST OF THE FILE STAYS THE SAME ...
+
 // ===================== MODULE VARIABLES =====================
 static WifiMgrContext ctx;
 static WifiMgrRTCData rtcWiFiData;
@@ -61,6 +39,12 @@ static WifiMgrRTCData rtcWiFiData;
 static WiFiEventHandler onConnectedHandler;
 static WiFiEventHandler onDisconnectedHandler;
 static WiFiEventHandler onGotIPHandler;
+
+// Telegram delay tracking
+static uint32_t telegramScheduledTime = 0;
+static bool telegramWaitingForDelay = false;
+static uint32_t connectionStableStartTime = 0;
+static bool connectionStabilityConfirmed = false;
 
 // ===================== STATE NAMES =====================
 static const char* STATE_NAMES[] = {
@@ -113,97 +97,87 @@ static void onConnectionEstablished(void);
 static void onConnectionLost(void);
 static void onHuntConnectionEstablished(void);
 static void saveConnectedCredentialsIfNew(void);
+static void scheduleTelegramSend(void);
+static void processTelegramDelay(uint32_t now);
 
 static void exitLightSleep(void);
-static void yieldWithLightSleep(uint32_t ms);
+static void yieldSafe(uint32_t ms);
 
 static void loadRTCWiFiData(void);
 static void saveRTCWiFiData(void);
 static uint32_t calculateCRC32(const uint8_t* data, size_t length);
 
 static const char* getSignalQuality(int8_t rssi);
+static bool isHeapSafe(uint32_t required);
+static void heapSafeYield(void);
+
+// ===================== HEAP SAFETY FUNCTIONS =====================
+static bool isHeapSafe(uint32_t required) {
+    uint32_t freeHeap = ESP.getFreeHeap();
+    return freeHeap >= required;
+}
+
+static void heapSafeYield(void) {
+    yield();
+    if (ESP.getFreeHeap() < WIFIMGR_HEAP_CRITICAL) {
+        delay(10);
+        yield();
+    }
+}
 
 // ===================== CONTEXT INITIALIZATION =====================
 static void initContext(void) {
+    memset(&ctx, 0, sizeof(ctx));
+    
     ctx.state = WIFI_MGR_IDLE;
     ctx.previousState = WIFI_MGR_IDLE;
     ctx.operationMode = WIFI_OP_MODE_NORMAL;
     ctx.lastFailureType = WIFI_FAIL_NONE;
     
-    ctx.lastAttemptTime = 0;
-    ctx.connectionStartTime = 0;
-    ctx.lastScanTime = 0;
-    ctx.lastScanCompleteTime = 0;
-    ctx.huntStartTime = 0;
-    ctx.lastSuccessfulConnection = 0;
-    ctx.lastTargetSeenTime = 0;
-    ctx.apModeStartTime = 0;
-    ctx.lightSleepStartTime = 0;
-    ctx.goodSignalStartTime = 0;
-    
-    ctx.savedNetworkAttempts = 0;
-    ctx.currentHardcodedIndex = 0;
     ctx.backoffMultiplier = 1;
-    ctx.quickRetryCount = 0;
-    ctx.wrongPasswordCount = 0;
-    ctx.authFailureCount = 0;
-    ctx.consecutiveScanMisses = 0;
-    ctx.consecutiveDisconnects = 0;
-    ctx.totalScanCount = 0;
-    
-    ctx.poorSignalDisconnectCount = 0;
-    ctx.poorSignalWindowStart = 0;
-    ctx.lastConnectedRSSI = -100;
-    ctx.lastDisconnectWasPoorSignal = false;
-    ctx.lastDisconnectTime = 0;
-    
-    ctx.scanResultsCached = false;
-    ctx.wifiEventRegistered = false;
-    ctx.targetNetworkEverSeen = false;
-    ctx.apModeTriggeredByAuthFail = false;
-    ctx.apModeTriggeredByPoorSignal = false;
-    ctx.scanInProgress = false;
-    ctx.isConnecting = false;
-    
-    ctx.availableNetworkCount = 0;
     ctx.lastRSSI = -100;
     ctx.bestSeenRSSI = -100;
+    ctx.lastConnectedRSSI = -100;
     
-    memset(ctx.cachedNetworkIndices, 0, sizeof(ctx.cachedNetworkIndices));
-    memset(ctx.targetSSID, 0, sizeof(ctx.targetSSID));
+    telegramScheduledTime = 0;
+    telegramWaitingForDelay = false;
+    connectionStableStartTime = 0;
+    connectionStabilityConfirmed = false;
 }
 
-// ===================== INITIALIZATION =====================
+// ===================== PUBLIC FUNCTIONS =====================
+
 void initWiFiManager(void) {
-    Serial.println(F("\n🔧 ===== Initializing WiFi Manager ====="));
+    Serial.println(F("\n===== Init WiFi Manager ====="));
     
-    // Initialize context
+    uint32_t freeHeap = ESP.getFreeHeap();
+    Serial.printf("Heap: %u bytes\n", freeHeap);
+    
+    if (freeHeap < WIFIMGR_HEAP_CRITICAL) {
+        Serial.println(F("WARNING: Low heap!"));
+    }
+    
     initContext();
     
-    // Register event handlers once
     if (!ctx.wifiEventRegistered) {
         onConnectedHandler = WiFi.onStationModeConnected(onWiFiStationConnected);
         onDisconnectedHandler = WiFi.onStationModeDisconnected(onWiFiStationDisconnected);
         onGotIPHandler = WiFi.onStationModeGotIP(onWiFiGotIP);
         ctx.wifiEventRegistered = true;
-        Serial.println(F("   ✓ Event handlers registered"));
+        Serial.println(F("Events registered"));
     }
     
-    // Load RTC data
     loadRTCWiFiData();
     
-    // Configure WiFi
     WiFi.setAutoReconnect(false);
     WiFi.persistent(false);
     WiFi.setPhyMode(WIFI_PHY_MODE_11N);
     WiFi.setOutputPower(20.5);
     
-    // Set target SSID
     if (strlen(settings.staSsid) > 0) {
         strncpy(ctx.targetSSID, settings.staSsid, sizeof(ctx.targetSSID) - 1);
         ctx.targetSSID[sizeof(ctx.targetSSID) - 1] = '\0';
-        Serial.print(F("   Target SSID: "));
-        Serial.println(ctx.targetSSID);
+        Serial.printf("Target: %s\n", ctx.targetSSID);
     }
     
     ctx.targetNetworkEverSeen = rtcWiFiData.targetEverSeen;
@@ -211,13 +185,11 @@ void initWiFiManager(void) {
     
     transitionState(WIFI_MGR_IDLE, "init");
     
-    Serial.print(F("   Mode: "));
     Serial.println(ctx.operationMode == WIFI_OP_MODE_INTERMITTENT_HUNT 
-                   ? "INTERMITTENT_HUNT" : "NORMAL");
-    Serial.println(F("========================================\n"));
+                   ? F("Mode: HUNT") : F("Mode: NORMAL"));
+    Serial.println(F("==============================\n"));
 }
 
-// ===================== PUBLIC FUNCTIONS =====================
 WifiMgrState getWiFiState(void) {
     return ctx.state;
 }
@@ -250,17 +222,17 @@ void setWiFiOperationMode(WifiMgrOperationMode mode) {
     
     if (mode != oldMode) {
         if (mode == WIFI_OP_MODE_INTERMITTENT_HUNT) {
-            Serial.println(F("\n🎯 Mode: INTERMITTENT_HUNT"));
+            Serial.println(F("Mode: HUNT"));
             ctx.huntStartTime = millis();
             ctx.backoffMultiplier = 1;
             
             if (ctx.state != WIFI_MGR_CONNECTED && ctx.state != WIFI_MGR_AP_MODE) {
-                transitionState(WIFI_MGR_HUNT_SCANNING, "mode change");
+                transitionState(WIFI_MGR_HUNT_SCANNING, "mode");
             }
         } else {
-            Serial.println(F("\n📶 Mode: NORMAL"));
+            Serial.println(F("Mode: NORMAL"));
             if (ctx.state != WIFI_MGR_CONNECTED && ctx.state != WIFI_MGR_AP_MODE) {
-                transitionState(WIFI_MGR_IDLE, "mode change");
+                transitionState(WIFI_MGR_IDLE, "mode");
             }
         }
     }
@@ -326,7 +298,7 @@ uint8_t getAuthFailureCount(void) {
 }
 
 void resetWiFiManager(void) {
-    Serial.println(F("🔄 Resetting WiFi Manager..."));
+    Serial.println(F("Resetting WiFi Manager..."));
     
     WiFi.disconnect(true);
     WiFi.scanDelete();
@@ -366,11 +338,100 @@ void setTargetSSID(const char* ssid) {
     ctx.authFailureCount = 0;
 }
 
+void printWiFiManagerStatus(void) {
+    uint32_t heap = ESP.getFreeHeap();
+    
+    Serial.println(F("\n====== WiFi Status ======"));
+    Serial.printf("State: %s\n", getWiFiStateName());
+    Serial.printf("Mode: %s\n", isInHuntMode() ? "HUNT" : "NORMAL");
+    Serial.printf("Connected: %s\n", wifiConnected ? "YES" : "NO");
+    
+    if (wifiConnected) {
+        Serial.printf("RSSI: %d %s\n", WiFi.RSSI(), getSignalQuality(WiFi.RSSI()));
+        Serial.print(F("IP: ")); Serial.println(WiFi.localIP());
+    }
+    
+    Serial.printf("Target: %s\n", strlen(ctx.targetSSID) > 0 ? ctx.targetSSID : "(none)");
+    Serial.printf("Scans: %d\n", ctx.totalScanCount);
+    Serial.printf("Wrong PW: %d/%d\n", ctx.wrongPasswordCount, WIFIMGR_MAX_WRONG_PASSWORD_ATTEMPTS);
+    Serial.printf("Auth fail: %d/%d\n", ctx.authFailureCount, WIFIMGR_MAX_AUTH_FAILURES);
+    Serial.printf("Poor sig: %d/%d\n", ctx.poorSignalDisconnectCount, WIFIMGR_MAX_POOR_SIGNAL_DISCONNECTS);
+    Serial.printf("Heap: %u %s\n", heap, heap < WIFIMGR_HEAP_CRITICAL ? "LOW!" : "OK");
+    Serial.printf("Telegram wait: %s\n", telegramWaitingForDelay ? "YES" : "NO");
+    Serial.println(F("=========================\n"));
+}
+
+// ===================== TELEGRAM DELAY HANDLER =====================
+static void scheduleTelegramSend(void) {
+    if (telegramTriggeredForThisConnection) {
+        return;
+    }
+    
+    telegramWaitingForDelay = true;
+    telegramScheduledTime = millis();
+    connectionStableStartTime = millis();
+    connectionStabilityConfirmed = false;
+    
+    Serial.println(F("\n>>> Telegram scheduled <<<"));
+    Serial.printf("    Delay: %d ms\n", WIFIMGR_TELEGRAM_DELAY_MS);
+}
+
+static void processTelegramDelay(uint32_t now) {
+    if (!telegramWaitingForDelay) {
+        return;
+    }
+    
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println(F("    Telegram cancelled - disconnected"));
+        telegramWaitingForDelay = false;
+        telegramScheduledTime = 0;
+        connectionStabilityConfirmed = false;
+        return;
+    }
+    
+    if (!connectionStabilityConfirmed) {
+        if (now - connectionStableStartTime >= WIFIMGR_CONNECTION_STABLE_MS) {
+            connectionStabilityConfirmed = true;
+            Serial.println(F("    Connection stable"));
+        } else {
+            return;
+        }
+    }
+    
+    if (now - telegramScheduledTime < WIFIMGR_TELEGRAM_DELAY_MS) {
+        return;
+    }
+    
+    uint32_t freeHeap = ESP.getFreeHeap();
+    if (freeHeap < WIFIMGR_MIN_HEAP_FOR_TELEGRAM) {
+        Serial.printf("    Heap low: %u, delaying...\n", freeHeap);
+        telegramScheduledTime = now;
+        heapSafeYield();
+        return;
+    }
+    
+    Serial.println(F("\n>>> TELEGRAM TRIGGERED <<<"));
+    Serial.printf("    Heap: %u bytes\n", freeHeap);
+    
+    telegramTriggeredForThisConnection = true;
+    telegramSendPending = true;
+    telegramDelayActive = false;
+    telegramSending = false;
+    telegramRetryCount = 0;
+    
+    telegramWaitingForDelay = false;
+    telegramScheduledTime = 0;
+}
+
 // ===================== MAIN STATE MACHINE =====================
 void manageWiFiConnection(void) {
     if (isMidCycleWake) return;
     
     uint32_t now = millis();
+    
+    if (telegramWaitingForDelay && ctx.state == WIFI_MGR_CONNECTED) {
+        processTelegramDelay(now);
+    }
     
     if (ctx.state == WIFI_MGR_AP_MODE) {
         handleAPModeState(now);
@@ -380,6 +441,11 @@ void manageWiFiConnection(void) {
     if (WiFi.getMode() != WIFI_STA && ctx.state != WIFI_MGR_AP_MODE) {
         WiFi.mode(WIFI_STA);
         delay(10);
+    }
+    
+    if (!isHeapSafe(WIFIMGR_HEAP_CRITICAL)) {
+        heapSafeYield();
+        return;
     }
     
     if (ctx.operationMode == WIFI_OP_MODE_INTERMITTENT_HUNT) {
@@ -420,7 +486,7 @@ static void handleIdleState(uint32_t now) {
     ctx.lastAttemptTime = now;
     
     if (strlen(settings.staSsid) > 0) {
-        Serial.println(F("📡 Trying saved network..."));
+        Serial.println(F("Trying saved network..."));
         tryConnectToNetwork(settings.staSsid, settings.staPassword);
         transitionState(WIFI_MGR_CONNECTING_SAVED, "saved");
     } else {
@@ -429,6 +495,12 @@ static void handleIdleState(uint32_t now) {
 }
 
 static void handleScanningState(uint32_t now) {
+    if (!isHeapSafe(WIFIMGR_MIN_HEAP_FOR_SCAN)) {
+        Serial.println(F("Low heap, skip scan"));
+        heapSafeYield();
+        return;
+    }
+    
     if (!ctx.scanInProgress) {
         if (startAsyncScan()) ctx.scanInProgress = true;
         return;
@@ -461,21 +533,12 @@ static void handleConnectingSavedState(uint32_t now) {
     wl_status_t status = WiFi.status();
     
     if (status == WL_CONNECTED) return;
-    
-    // WL_CONNECT_FAILED usually means auth failure
-    if (status == WL_CONNECT_FAILED) { 
-        handleAuthFailure(); 
-        return; 
-    }
-    
-    if (status == WL_NO_SSID_AVAIL) { 
-        handleSSIDNotFound(); 
-        return; 
-    }
+    if (status == WL_CONNECT_FAILED) { handleAuthFailure(); return; }
+    if (status == WL_NO_SSID_AVAIL) { handleSSIDNotFound(); return; }
     
     if (now - ctx.lastAttemptTime >= WIFIMGR_MAX_CONNECT_TIMEOUT_MS) {
         ctx.savedNetworkAttempts++;
-        Serial.printf(" Timeout (%d/%d)\n", ctx.savedNetworkAttempts, WIFIMGR_MAX_STA_ATTEMPTS);
+        Serial.printf("Timeout (%d/%d)\n", ctx.savedNetworkAttempts, WIFIMGR_MAX_STA_ATTEMPTS);
         
         if (ctx.savedNetworkAttempts >= WIFIMGR_MAX_STA_ATTEMPTS) {
             transitionState(WIFI_MGR_SCANNING, "max attempts");
@@ -483,36 +546,14 @@ static void handleConnectingSavedState(uint32_t now) {
             transitionState(WIFI_MGR_WAITING_BACKOFF, "timeout");
         }
     }
+    
+    heapSafeYield();
 }
 
 static void handleConnectingHardcodedState(uint32_t now) {
     wl_status_t status = WiFi.status();
     
     if (status == WL_CONNECTED) return;
-    
-    if (status == WL_CONNECT_FAILED) { 
-        handleAuthFailure(); 
-        return; 
-    }
-    
-    if (now - ctx.lastAttemptTime >= WIFIMGR_MAX_CONNECT_TIMEOUT_MS) {
-        ctx.currentHardcodedIndex++;
-        if (ctx.currentHardcodedIndex < ctx.availableNetworkCount) {
-            tryConnectToHardcodedNetwork(ctx.currentHardcodedIndex);
-            ctx.lastAttemptTime = now;
-        } else {
-            if (!shouldFallbackToAP()) {
-                transitionState(WIFI_MGR_WAITING_BACKOFF, "all tried");
-            }
-        }
-    }
-}
-/*
-static void handleConnectingHardcodedState(uint32_t now) {
-    wl_status_t status = WiFi.status();
-    
-    if (status == WL_CONNECTED) return;
-    if (status == WL_WRONG_PASSWORD) { handleWrongPassword(); return; }
     if (status == WL_CONNECT_FAILED) { handleAuthFailure(); return; }
     
     if (now - ctx.lastAttemptTime >= WIFIMGR_MAX_CONNECT_TIMEOUT_MS) {
@@ -526,8 +567,9 @@ static void handleConnectingHardcodedState(uint32_t now) {
             }
         }
     }
+    
+    heapSafeYield();
 }
-*/
 
 static void handleConnectedState(uint32_t now) {
     if (WiFi.status() != WL_CONNECTED) {
@@ -540,16 +582,14 @@ static void handleConnectedState(uint32_t now) {
         return;
     }
     
-    // Track RSSI
     static uint32_t lastRSSICheck = 0;
-    if (now - lastRSSICheck >= 1000) {
+    if (now - lastRSSICheck >= 2000) {
         lastRSSICheck = now;
         ctx.lastConnectedRSSI = WiFi.RSSI();
         ctx.lastRSSI = ctx.lastConnectedRSSI;
         if (ctx.lastRSSI > ctx.bestSeenRSSI) ctx.bestSeenRSSI = ctx.lastRSSI;
     }
     
-    // Reset poor signal counter after stable good connection
     if (ctx.lastConnectedRSSI >= WIFIMGR_POOR_SIGNAL_THRESHOLD_DBM) {
         if (ctx.goodSignalStartTime == 0) {
             ctx.goodSignalStartTime = now;
@@ -565,11 +605,12 @@ static void handleConnectedState(uint32_t now) {
     }
     
     ctx.consecutiveDisconnects = 0;
+    heapSafeYield();
 }
 
 static void handleBackoffState(uint32_t now) {
     uint32_t backoffDelay = calculateBackoffDelay();
-    yieldWithLightSleep(10);
+    yieldSafe(10);
     
     if (now - ctx.lastAttemptTime >= backoffDelay) {
         transitionState(WIFI_MGR_IDLE, "backoff done");
@@ -591,89 +632,77 @@ static void handleAPModeState(uint32_t now) {
             }
         }
     }
+    
+    heapSafeYield();
 }
 
 // ===================== HUNT MODE HANDLERS =====================
 static void handleHuntScanningState(uint32_t now) {
-    // Check AP fallback first
     if (shouldFallbackToAP()) return;
     
-    Serial.println(F("\n ===== HUNT SCAN ====="));
+    if (!isHeapSafe(WIFIMGR_MIN_HEAP_FOR_SCAN)) {
+        Serial.println(F("Low heap, delaying scan"));
+        yieldSafe(100);
+        return;
+    }
     
-    // Make sure WiFi is in correct mode
+    Serial.println(F("\n===== HUNT SCAN ====="));
+    Serial.printf("Heap: %u\n", ESP.getFreeHeap());
+    
     if (WiFi.getMode() != WIFI_STA) {
-        Serial.println(F(" WiFi not in STA mode! Fixing..."));
         WiFi.disconnect(true);
         delay(100);
         WiFi.mode(WIFI_STA);
         delay(500);
     }
     
-    Serial.printf("WiFi Mode: %d (1=STA)\n", WiFi.getMode());
-    
-    // Use BLOCKING scan (more reliable than async after sleep issues)
     Serial.println(F("Scanning..."));
-    int scanResult = WiFi.scanNetworks(false, true);  // blocking, show hidden
+    int scanResult = WiFi.scanNetworks(false, true);
     
     ctx.totalScanCount++;
-    Serial.printf("Found %d networks:\n", scanResult);
+    Serial.printf("Found: %d\n", scanResult);
     
     if (scanResult <= 0) {
-        Serial.println(F("   (none found)"));
-        Serial.println(F("========================\n"));
-        
         WiFi.scanDelete();
         ctx.consecutiveScanMisses++;
-        
-        // Wait and try again
+        Serial.println(F("====================\n"));
         transitionState(WIFI_MGR_HUNT_LIGHT_SLEEP, "no networks");
         return;
     }
     
-    // Print all found networks
     bool targetFound = false;
     const char* targetSSID = strlen(ctx.targetSSID) > 0 ? ctx.targetSSID : settings.staSsid;
     
-    for (int i = 0; i < scanResult; i++) {
+    for (int i = 0; i < scanResult && !targetFound; i++) {
         String ssid = WiFi.SSID(i);
         int rssi = WiFi.RSSI(i);
         
-        bool isTarget = (strlen(targetSSID) > 0 && ssid.equals(targetSSID));
-        bool isHardcoded = false;
-        
-        // Check hardcoded networks
-        for (size_t h = 0; h < NUM_HARDCODED_NETWORKS; h++) {
-            if (ssid.equals(hardcodedNetworks[h].ssid)) {
-                isHardcoded = true;
-                if (!targetFound) {
-                    // Use first hardcoded network found if no specific target
-                    strncpy(ctx.targetSSID, hardcodedNetworks[h].ssid, sizeof(ctx.targetSSID) - 1);
-                }
-                break;
-            }
-        }
-        
-        Serial.printf("   %d: [%s] %d dBm", i, ssid.c_str(), rssi);
-        if (isTarget) {
-            Serial.print(F(" <-- TARGET"));
+        if (strlen(targetSSID) > 0 && ssid.equals(targetSSID)) {
             targetFound = true;
             ctx.lastRSSI = rssi;
+            Serial.printf("  [%s] %d dBm <TARGET>\n", ssid.c_str(), rssi);
         }
-        if (isHardcoded) {
-            Serial.print(F(" (known)"));
-            if (!targetFound) {
-                targetFound = true;
-                ctx.lastRSSI = rssi;
+        
+        if (!targetFound) {
+            for (size_t h = 0; h < NUM_HARDCODED_NETWORKS; h++) {
+                if (ssid.equals(hardcodedNetworks[h].ssid)) {
+                    strncpy(ctx.targetSSID, hardcodedNetworks[h].ssid, sizeof(ctx.targetSSID) - 1);
+                    targetFound = true;
+                    ctx.lastRSSI = rssi;
+                    Serial.printf("  [%s] %d dBm <KNOWN>\n", ssid.c_str(), rssi);
+                    break;
+                }
             }
         }
-        Serial.println();
+        
+        heapSafeYield();
     }
     
     WiFi.scanDelete();
-    Serial.println(F("========================\n"));
+    Serial.println(F("====================\n"));
     
     if (targetFound) {
-        Serial.println(F("TARGET FOUND! Connecting..."));
+        Serial.println(F("TARGET FOUND!"));
         
         ctx.targetNetworkEverSeen = true;
         ctx.lastTargetSeenTime = now;
@@ -683,17 +712,14 @@ static void handleHuntScanningState(uint32_t now) {
         rtcWiFiData.targetEverSeen = true;
         saveRTCWiFiData();
         
-        // Try to connect
         const char* ssidToUse = NULL;
         const char* passToUse = NULL;
         
-        // First try saved credentials
         if (strlen(settings.staSsid) > 0) {
             ssidToUse = settings.staSsid;
             passToUse = settings.staPassword;
         }
         
-        // If no saved credentials or target is different, check hardcoded
         if (ssidToUse == NULL || !String(ssidToUse).equals(ctx.targetSSID)) {
             for (size_t i = 0; i < NUM_HARDCODED_NETWORKS; i++) {
                 if (String(hardcodedNetworks[i].ssid).equals(ctx.targetSSID)) {
@@ -705,128 +731,55 @@ static void handleHuntScanningState(uint32_t now) {
         }
         
         if (ssidToUse != NULL) {
-            Serial.printf("   SSID: [%s]\n", ssidToUse);
-            Serial.printf("   Pass: [%s]\n", passToUse);
             tryConnectToNetwork(ssidToUse, passToUse);
             transitionState(WIFI_MGR_HUNT_CONNECTING, "found");
         } else {
-            Serial.println(F("    No credentials found!"));
             transitionState(WIFI_MGR_HUNT_LIGHT_SLEEP, "no creds");
         }
-        
     } else {
         ctx.consecutiveScanMisses++;
-        Serial.printf("Target not found (miss #%d)\n", ctx.consecutiveScanMisses);
+        Serial.printf("Miss #%d\n", ctx.consecutiveScanMisses);
         transitionState(WIFI_MGR_HUNT_LIGHT_SLEEP, "not found");
     }
 }
-/*
-static void handleHuntScanningState(uint32_t now) {
-    if (shouldFallbackToAP()) return;
-    
-    if (!ctx.scanInProgress) {
-        Serial.println(F("🔍 Hunt scan..."));
-        if (startAsyncScan()) ctx.scanInProgress = true;
-        return;
-    }
-    
-    int8_t scanResult = WiFi.scanComplete();
-    if (scanResult == -1) { yieldWithLightSleep(10); return; }
-    
-    ctx.scanInProgress = false;
-    ctx.totalScanCount++;
-    
-    if (scanResult < 0) {
-        transitionState(WIFI_MGR_HUNT_LIGHT_SLEEP, "scan fail");
-        return;
-    }
-    
-    Serial.printf("   Found %d networks\n", scanResult);
-    ctx.lastScanCompleteTime = now;
-    
-    bool targetFound = isTargetInScanResults(scanResult);
-    WiFi.scanDelete();
-    
-    if (targetFound) {
-        Serial.println(F("🎯 TARGET FOUND!"));
-        ctx.targetNetworkEverSeen = true;
-        ctx.lastTargetSeenTime = now;
-        ctx.consecutiveScanMisses = 0;
-        ctx.quickRetryCount = 0;
-        
-        rtcWiFiData.targetEverSeen = true;
-        saveRTCWiFiData();
-        
-        if (strlen(settings.staSsid) > 0) {
-            tryConnectToNetwork(settings.staSsid, settings.staPassword);
-        } else {
-            for (size_t i = 0; i < NUM_HARDCODED_NETWORKS; i++) {
-                if (strcmp(hardcodedNetworks[i].ssid, ctx.targetSSID) == 0) {
-                    tryConnectToNetwork(hardcodedNetworks[i].ssid, 
-                                        hardcodedNetworks[i].password);
-                    break;
-                }
-            }
-        }
-        transitionState(WIFI_MGR_HUNT_CONNECTING, "found");
-    } else {
-        ctx.consecutiveScanMisses++;
-        transitionState(WIFI_MGR_HUNT_LIGHT_SLEEP, "not found");
-    }
-}
-*/
+
 static void handleHuntConnectingState(uint32_t now) {
     wl_status_t status = WiFi.status();
     
-    // Print status every second
     static uint32_t lastPrint = 0;
-    if (now - lastPrint >= 1000) {
+    if (now - lastPrint >= 2000) {
         lastPrint = now;
-        Serial.printf("   Connect status: %d ", status);
-        switch(status) {
-            case WL_IDLE_STATUS: Serial.println(F("(idle)")); break;
-            case WL_NO_SSID_AVAIL: Serial.println(F("(no SSID)")); break;
-            case WL_CONNECTED: Serial.println(F("(connected!)")); break;
-            case WL_CONNECT_FAILED: Serial.println(F("(failed)")); break;
-            case WL_DISCONNECTED: Serial.println(F("(disconnected/wrong pw)")); break;
-            default: Serial.printf("(code %d)\n", status); break;
-        }
+        Serial.printf("Status: %d\n", status);
     }
     
-    // Connected - handled by event callback
     if (status == WL_CONNECTED) return;
     
-    // Connection failed
     if (status == WL_CONNECT_FAILED) {
-        Serial.println(F(" Connection failed!"));
+        Serial.println(F("Connect failed!"));
         ctx.authFailureCount++;
         if (ctx.authFailureCount >= WIFIMGR_MAX_AUTH_FAILURES) {
             enterAPMode("Auth failed", true, false);
             return;
         }
-        transitionState(WIFI_MGR_HUNT_SCANNING, "connect failed");
+        transitionState(WIFI_MGR_HUNT_SCANNING, "failed");
         return;
     }
     
-    // SSID not available (disappeared during connect)
     if (status == WL_NO_SSID_AVAIL) {
-        Serial.println(F(" SSID disappeared!"));
+        Serial.println(F("SSID gone"));
         transitionState(WIFI_MGR_HUNT_SCANNING, "ssid gone");
         return;
     }
     
-    // Timeout
     if (now - ctx.lastAttemptTime >= WIFIMGR_HUNT_CONNECT_TIMEOUT_MS) {
         ctx.quickRetryCount++;
-        Serial.printf(" Timeout! Quick retry %d/%d\n", 
+        Serial.printf("Timeout! Retry %d/%d\n", 
                       ctx.quickRetryCount, WIFIMGR_HUNT_MAX_QUICK_RETRIES);
         
         if (ctx.quickRetryCount < WIFIMGR_HUNT_MAX_QUICK_RETRIES) {
-            // Quick retry
             if (strlen(settings.staSsid) > 0) {
                 tryConnectToNetwork(settings.staSsid, settings.staPassword);
             } else if (strlen(ctx.targetSSID) > 0) {
-                // Find password for target
                 for (size_t i = 0; i < NUM_HARDCODED_NETWORKS; i++) {
                     if (String(hardcodedNetworks[i].ssid).equals(ctx.targetSSID)) {
                         tryConnectToNetwork(hardcodedNetworks[i].ssid, 
@@ -837,92 +790,37 @@ static void handleHuntConnectingState(uint32_t now) {
             }
             ctx.lastAttemptTime = now;
         } else {
-            Serial.println(F("   Max retries reached, scanning again..."));
             ctx.quickRetryCount = 0;
             transitionState(WIFI_MGR_HUNT_SCANNING, "max retries");
         }
     }
     
-    yield();
+    heapSafeYield();
 }
-/*
-static void handleHuntConnectingState(uint32_t now) {
-    wl_status_t status = WiFi.status();
-    
-    if (status == WL_CONNECTED) return;
-    if (status == WL_WRONG_PASSWORD) { handleWrongPassword(); return; }
-    
-    if (status == WL_CONNECT_FAILED) {
-        ctx.authFailureCount++;
-        if (ctx.authFailureCount >= WIFIMGR_MAX_AUTH_FAILURES) {
-            enterAPMode("Auth failed", true, false);
-            return;
-        }
-    }
-    
-    if (now - ctx.lastAttemptTime >= WIFIMGR_HUNT_CONNECT_TIMEOUT_MS) {
-        ctx.quickRetryCount++;
-        if (ctx.quickRetryCount < WIFIMGR_HUNT_MAX_QUICK_RETRIES) {
-            if (strlen(settings.staSsid) > 0) {
-                tryConnectToNetwork(settings.staSsid, settings.staPassword);
-            }
-            ctx.lastAttemptTime = now;
-        } else {
-            ctx.quickRetryCount = 0;
-            transitionState(WIFI_MGR_HUNT_SCANNING, "retries done");
-        }
-    }
-}
-*/
+
 static void handleHuntLightSleepState(uint32_t now) {
-    // OPTION 1: Don't use forceSleep at all (more reliable)
-    // Just wait a few seconds before scanning again
-    
     if (ctx.lightSleepStartTime == 0) {
         ctx.lightSleepStartTime = now;
-        Serial.printf(" Waiting %d ms before next scan...\n", WIFIMGR_HUNT_LIGHT_SLEEP_MS);
-        
-        // DON'T use forceSleepBegin - it breaks WiFi scanning!
-        // WiFi.forceSleepBegin();  // COMMENTED OUT!
+        Serial.printf("Wait %d ms...\n", WIFIMGR_HUNT_LIGHT_SLEEP_MS);
     }
     
     if (now - ctx.lightSleepStartTime >= WIFIMGR_HUNT_LIGHT_SLEEP_MS) {
         ctx.lightSleepStartTime = 0;
         
-        // Make sure WiFi is ready for scanning
         if (WiFi.getMode() != WIFI_STA) {
-            Serial.println(F("   Fixing WiFi mode..."));
             WiFi.mode(WIFI_STA);
             delay(200);
         }
         
         transitionState(WIFI_MGR_HUNT_SCANNING, "wait done");
     } else {
-        // Just delay, don't sleep
-        delay(100);
-        yield();
+        yieldSafe(100);
     }
 }
-/*
-static void handleHuntLightSleepState(uint32_t now) {
-    if (ctx.lightSleepStartTime == 0) {
-        ctx.lightSleepStartTime = now;
-        WiFi.forceSleepBegin();
-        delay(1);
-    }
-    
-    if (now - ctx.lightSleepStartTime >= WIFIMGR_HUNT_LIGHT_SLEEP_MS) {
-        exitLightSleep();
-        ctx.lightSleepStartTime = 0;
-        transitionState(WIFI_MGR_HUNT_SCANNING, "sleep done");
-    } else {
-        delay(100);
-    }
-}
-*/
+
 // ===================== EVENT CALLBACKS =====================
 static void onWiFiStationConnected(const WiFiEventStationModeConnected& event) {
-    Serial.print(F("📶 Associated: "));
+    Serial.print(F("Associated: "));
     Serial.println(event.ssid.c_str());
     ctx.isConnecting = true;
 }
@@ -930,8 +828,14 @@ static void onWiFiStationConnected(const WiFiEventStationModeConnected& event) {
 static void onWiFiStationDisconnected(const WiFiEventStationModeDisconnected& event) {
     uint32_t now = millis();
     
-    Serial.println(F("\n❌ DISCONNECTED"));
-    Serial.printf("   Reason: %d, RSSI: %d\n", event.reason, ctx.lastConnectedRSSI);
+    Serial.println(F("\nDISCONNECTED"));
+    Serial.printf("Reason: %d\n", event.reason);
+    
+    if (telegramWaitingForDelay) {
+        telegramWaitingForDelay = false;
+        telegramScheduledTime = 0;
+        Serial.println(F("Telegram cancelled"));
+    }
     
     bool wasPasswordIssue = false;
     bool wasPoorSignal = false;
@@ -988,14 +892,14 @@ static void onWiFiStationDisconnected(const WiFiEventStationModeDisconnected& ev
 }
 
 static void onWiFiGotIP(const WiFiEventStationModeGotIP& event) {
-    Serial.println(F("\n✅ CONNECTED"));
-    Serial.print(F("   IP: ")); Serial.println(event.ip);
-    Serial.printf("   RSSI: %d dBm\n", WiFi.RSSI());
+    Serial.println(F("\n=== CONNECTED ==="));
+    Serial.print(F("IP: ")); Serial.println(event.ip);
+    Serial.printf("RSSI: %d dBm\n", WiFi.RSSI());
+    Serial.printf("Heap: %u\n", ESP.getFreeHeap());
     
     ctx.isConnecting = false;
     transitionState(WIFI_MGR_CONNECTED, "got IP");
     
-    // Reset all counters
     ctx.savedNetworkAttempts = 0;
     ctx.currentHardcodedIndex = 0;
     ctx.backoffMultiplier = 1;
@@ -1011,6 +915,7 @@ static void onWiFiGotIP(const WiFiEventStationModeGotIP& event) {
     ctx.lastConnectedRSSI = WiFi.RSSI();
     ctx.lastRSSI = ctx.lastConnectedRSSI;
     ctx.goodSignalStartTime = 0;
+    connectionStabilityConfirmed = false;
     
     if (ctx.lastRSSI > ctx.bestSeenRSSI) ctx.bestSeenRSSI = ctx.lastRSSI;
     
@@ -1030,7 +935,7 @@ static void handleWrongPassword(void) {
     ctx.wrongPasswordCount++;
     ctx.lastFailureType = WIFI_FAIL_WRONG_PASSWORD;
     
-    Serial.printf("🔐 Wrong password: %d/%d\n", 
+    Serial.printf("Wrong password: %d/%d\n", 
                   ctx.wrongPasswordCount, WIFIMGR_MAX_WRONG_PASSWORD_ATTEMPTS);
     
     if (ctx.wrongPasswordCount >= WIFIMGR_MAX_WRONG_PASSWORD_ATTEMPTS) {
@@ -1048,7 +953,7 @@ static void handleAuthFailure(void) {
     ctx.authFailureCount++;
     ctx.lastFailureType = WIFI_FAIL_WRONG_PASSWORD;
     
-    Serial.printf("🔐 Auth failure: %d/%d\n", 
+    Serial.printf("Auth failure: %d/%d\n", 
                   ctx.authFailureCount, WIFIMGR_MAX_AUTH_FAILURES);
     
     if (ctx.authFailureCount >= WIFIMGR_MAX_AUTH_FAILURES) {
@@ -1088,42 +993,36 @@ static void handlePoorSignalDisconnect(void) {
     ctx.lastDisconnectWasPoorSignal = true;
     ctx.lastFailureType = WIFI_FAIL_POOR_SIGNAL;
     
-    Serial.printf("📶 Poor signal: %d/%d (RSSI: %d)\n",
+    Serial.printf("Poor signal: %d/%d\n",
                   ctx.poorSignalDisconnectCount,
-                  WIFIMGR_MAX_POOR_SIGNAL_DISCONNECTS,
-                  ctx.lastConnectedRSSI);
+                  WIFIMGR_MAX_POOR_SIGNAL_DISCONNECTS);
 }
 
 static bool shouldFallbackToAP(void) {
     uint32_t now = millis();
     
-    // Wrong password
     if (ctx.wrongPasswordCount >= WIFIMGR_MAX_WRONG_PASSWORD_ATTEMPTS) {
         enterAPMode("Wrong password", true, false);
         return true;
     }
     
-    // Auth failures
     if (ctx.authFailureCount >= WIFIMGR_MAX_AUTH_FAILURES) {
         enterAPMode("Auth failed", true, false);
         return true;
     }
     
-    // Poor signal window reset
     if (ctx.poorSignalWindowStart > 0 && 
         (now - ctx.poorSignalWindowStart) > WIFIMGR_POOR_SIGNAL_WINDOW_MS) {
         ctx.poorSignalDisconnectCount = 0;
         ctx.poorSignalWindowStart = 0;
     }
     
-    // Poor signal disconnects
     if (ctx.poorSignalDisconnectCount >= WIFIMGR_MAX_POOR_SIGNAL_DISCONNECTS) {
         enterAPMode("Poor signal", false, true);
         return true;
     }
     
-    // Protect Telegram
-    if (telegramSendPending || telegramDelayActive || telegramSending) {
+    if (telegramSendPending || telegramDelayActive || telegramSending || telegramWaitingForDelay) {
         return false;
     }
     
@@ -1131,8 +1030,11 @@ static bool shouldFallbackToAP(void) {
 }
 
 static void enterAPMode(const char* reason, bool authFailure, bool poorSignal) {
-    Serial.println(F("\n📡 ===== ENTERING AP MODE ====="));
-    Serial.print(F("   Reason: ")); Serial.println(reason);
+    Serial.println(F("\n===== AP MODE ====="));
+    Serial.printf("Reason: %s\n", reason);
+    
+    telegramWaitingForDelay = false;
+    telegramScheduledTime = 0;
     
     ctx.apModeTriggeredByAuthFail = authFailure;
     ctx.apModeTriggeredByPoorSignal = poorSignal;
@@ -1151,7 +1053,7 @@ static void enterAPMode(const char* reason, bool authFailure, bool poorSignal) {
 }
 
 static void exitAPMode(void) {
-    Serial.println(F("\n📡 Exiting AP mode...\n"));
+    Serial.println(F("\nExiting AP mode...\n"));
     
     isApModeActive = false;
     ctx.apModeTriggeredByAuthFail = false;
@@ -1181,15 +1083,7 @@ static void onConnectionEstablished(void) {
     wifiConnected = true;
     isApModeActive = false;
     
-    if (!telegramTriggeredForThisConnection) {
-        Serial.println(F("\n📱 >>> TELEGRAM TRIGGERED <<<\n"));
-        telegramTriggeredForThisConnection = true;
-        telegramSendPending = true;
-        telegramDelayActive = false;
-        telegramSending = false;
-        telegramRetryCount = 0;
-    }
-    
+    scheduleTelegramSend();
     saveConnectedCredentialsIfNew();
     
     if (lastTimeSync == 0) {
@@ -1199,7 +1093,7 @@ static void onConnectionEstablished(void) {
 }
 
 static void onHuntConnectionEstablished(void) {
-    Serial.println(F("\n🎯 ===== HUNT SUCCESS! ====="));
+    Serial.println(F("\n===== HUNT SUCCESS! ====="));
     
     wifiConnected = true;
     isApModeActive = false;
@@ -1209,28 +1103,26 @@ static void onHuntConnectionEstablished(void) {
     ctx.huntStartTime = millis();
     ctx.consecutiveDisconnects = 0;
     
-    Serial.printf("   RSSI: %d dBm %s\n", ctx.lastConnectedRSSI, 
+    Serial.printf("RSSI: %d dBm %s\n", ctx.lastConnectedRSSI, 
                   getSignalQuality(ctx.lastConnectedRSSI));
+    Serial.printf("Heap: %u\n", ESP.getFreeHeap());
     
-    if (!telegramTriggeredForThisConnection) {
-        Serial.println(F("📱 >>> IMMEDIATE TELEGRAM <<<"));
-        telegramTriggeredForThisConnection = true;
-        telegramSendPending = true;
-        telegramDelayActive = false;
-        telegramSending = false;
-        telegramRetryCount = 0;
-    }
+    scheduleTelegramSend();
     
+    delay(500);
     syncTimeFromNTP();
     lastTimeSync = millis();
     
     saveConnectedCredentialsIfNew();
-    Serial.println(F("============================\n"));
+    Serial.println(F("========================\n"));
 }
 
 static void onConnectionLost(void) {
     wifiConnected = false;
     telegramTriggeredForThisConnection = false;
+    telegramWaitingForDelay = false;
+    telegramScheduledTime = 0;
+    connectionStabilityConfirmed = false;
     ctx.goodSignalStartTime = 0;
 }
 
@@ -1258,7 +1150,7 @@ static void saveConnectedCredentialsIfNew(void) {
 static void transitionState(WifiMgrState newState, const char* reason) {
     if (ctx.state != newState) {
         ctx.previousState = ctx.state;
-        Serial.printf("🔄 %s → %s", getWiFiStateNameByState(ctx.state), 
+        Serial.printf("%s->%s", getWiFiStateNameByState(ctx.state), 
                       getWiFiStateNameByState(newState));
         if (reason && strlen(reason) > 0) Serial.printf(" (%s)", reason);
         Serial.println();
@@ -1270,7 +1162,7 @@ static void transitionState(WifiMgrState newState, const char* reason) {
 static bool tryConnectToNetwork(const char* ssid, const char* password) {
     WiFi.disconnect(true);
     delay(10);
-    Serial.print(F("📶 Connecting: ")); Serial.println(ssid);
+    Serial.printf("Connect: %s\n", ssid);
     WiFi.begin(ssid, password);
     ctx.connectionStartTime = millis();
     ctx.lastAttemptTime = millis();
@@ -1326,6 +1218,7 @@ static void cacheAvailableNetworks(int scanCount) {
                 break;
             }
         }
+        heapSafeYield();
     }
     ctx.scanResultsCached = true;
 }
@@ -1338,40 +1231,26 @@ static uint32_t calculateBackoffDelay(void) {
     return backoff;
 }
 
-// ===================== POWER MANAGEMENT =====================
+// ===================== UTILITY FUNCTIONS =====================
 static void exitLightSleep(void) {
-    Serial.println(F(" Waking WiFi from sleep..."));
-    
-    // Wake up WiFi
+    Serial.println(F("Waking WiFi..."));
     WiFi.forceSleepWake();
-    delay(100);  // IMPORTANT: Wait for radio to stabilize
-    
-    // Re-enable STA mode (forceSleep may have changed it)
+    delay(100);
     WiFi.mode(WIFI_STA);
-    delay(200);  // IMPORTANT: Wait for mode to apply
-    
-    Serial.printf("   WiFi Mode: %d (should be 1)\n", WiFi.getMode());
+    delay(200);
 }
-static void yieldWithLightSleep(uint32_t ms) {
-    // DON'T use forceSleep - just regular delay
+
+static void yieldSafe(uint32_t ms) {
     if (ms > 0) {
         delay(ms);
     }
     yield();
-}
-/*
-static void yieldWithLightSleep(uint32_t ms) {
-    if (ms >= 10) {
-        WiFi.forceSleepBegin();
-        delay(ms);
-        WiFi.forceSleepWake();
-        delay(1);
-    } else {
-        delay(ms);
+    
+    if (ESP.getFreeHeap() < WIFIMGR_HEAP_CRITICAL) {
+        delay(10);
+        yield();
     }
-    yield();
 }
-*/
 
 // ===================== RTC PERSISTENCE =====================
 static uint32_t calculateCRC32(const uint8_t* data, size_t length) {
@@ -1404,32 +1283,10 @@ static void saveRTCWiFiData(void) {
     ESP.rtcUserMemoryWrite(64, (uint32_t*)&rtcWiFiData, sizeof(rtcWiFiData));
 }
 
-// ===================== UTILITY =====================
 static const char* getSignalQuality(int8_t rssi) {
     if (rssi >= -50) return "(Excellent)";
     if (rssi >= -60) return "(Good)";
     if (rssi >= -70) return "(Fair)";
     if (rssi >= -80) return "(Weak)";
-    return "(Very Weak)";
-}
-
-// ===================== DEBUG =====================
-void printWiFiManagerStatus(void) {
-    Serial.println(F("\n========== WiFi Manager =========="));
-    Serial.printf("State: %s\n", getWiFiStateName());
-    Serial.printf("Mode: %s\n", isInHuntMode() ? "HUNT" : "NORMAL");
-    Serial.printf("Connected: %s\n", wifiConnected ? "YES" : "NO");
-    
-    if (wifiConnected) {
-        Serial.printf("RSSI: %d dBm %s\n", WiFi.RSSI(), getSignalQuality(WiFi.RSSI()));
-        Serial.print(F("IP: ")); Serial.println(WiFi.localIP());
-    }
-    
-    Serial.printf("Target: %s\n", strlen(ctx.targetSSID) > 0 ? ctx.targetSSID : "(none)");
-    Serial.printf("Scans: %d\n", ctx.totalScanCount);
-    Serial.printf("Wrong PW: %d/%d\n", ctx.wrongPasswordCount, WIFIMGR_MAX_WRONG_PASSWORD_ATTEMPTS);
-    Serial.printf("Auth fail: %d/%d\n", ctx.authFailureCount, WIFIMGR_MAX_AUTH_FAILURES);
-    Serial.printf("Poor signal: %d/%d\n", ctx.poorSignalDisconnectCount, WIFIMGR_MAX_POOR_SIGNAL_DISCONNECTS);
-    Serial.printf("Heap: %u\n", ESP.getFreeHeap());
-    Serial.println(F("==================================\n"));
+    return "(V.Weak)";
 }
