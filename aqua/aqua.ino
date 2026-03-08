@@ -1528,8 +1528,16 @@ server.on("/files", HTTP_GET, [](AsyncWebServerRequest *request) {
     strncpy(settings.hostname, newHost, sizeof(settings.hostname) - 1);
     settings.hostname[sizeof(settings.hostname) - 1] = '\0';
     const char* staSsid = doc["staSsid"] | "";
-    const char* staPass = doc["staPassword"] | "";
-    strncpy(settings.staSsid, staSsid, sizeof(settings.staSsid) - 1);
+    // OLD:
+//const char* staPass = doc["staPassword"] | "";
+//strncpy(settings.staPassword, staPass, sizeof(settings.staPassword) - 1);
+
+// NEW — only overwrite if a value was actually provided:
+if (doc.containsKey("staPassword") && strlen(doc["staPassword"] | "") > 0) {
+    const char* staPass = doc["staPassword"];
+    strncpy(settings.staPassword, staPass, sizeof(settings.staPassword) - 1);
+    settings.staPassword[sizeof(settings.staPassword) - 1] = '\0';
+}
     settings.staSsid[sizeof(settings.staSsid) - 1] = '\0';
     strncpy(settings.staPassword, staPass, sizeof(settings.staPassword) - 1);
     settings.staPassword[sizeof(settings.staPassword) - 1] = '\0';
@@ -1605,7 +1613,7 @@ server.on("/files", HTTP_GET, [](AsyncWebServerRequest *request) {
       Serial.println(F("âœ… Settings saved successfully."));
       request->send(200, "text/plain", "Settings saved successfully.");
       broadcastStatus();
-      //pendingRestart = true;
+      pendingRestart = true;
     } else {
       Serial.println(F("âŒ Failed to save settings to flash."));
       request->send(500, "text/plain", "Failed to save settings.");
@@ -2671,6 +2679,7 @@ void handleGetSettings(AsyncWebServerRequest *request) {
   }
   StaticJsonDocument<SETTINGS_DOC_CAPACITY> doc;
   doc["staSsid"] = settings.staSsid;
+doc["staPassword"] = settings.staPassword;  // ← ADD THIS
   doc["hostname"] = settings.hostname;
   doc["useDHCP"] = settings.useDHCP;
   doc["staticIp"] = settings.staticIp.toString();
@@ -2794,4 +2803,3 @@ void broadcastStatus() {
     events.send(jsonBuffer, "status");
   }
 }
-
