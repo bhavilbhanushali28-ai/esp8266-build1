@@ -2670,7 +2670,8 @@ void handleGetSettings(AsyncWebServerRequest *request) {
   doc["relayPin"] = settings.relayPin;
   doc["defaultRelayDuration"] = settings.defaultRelayDuration;
   doc["maxRelayRuntime"] = settings.maxRelayRuntime;
-  doc["switchCooldownSec"] = settings.switchCooldownSec;oc["deepSleepDurationSeconds"] = settings.deepSleepDurationSeconds;
+    doc["switchCooldownSec"] = settings.switchCooldownSec;
+doc["deepSleepDurationSeconds"] = settings.deepSleepDurationSeconds;
   doc["autoDeepSleepEnabled"] = settings.autoDeepSleepEnabled; 
   char responseBuffer[SETTINGS_DOC_CAPACITY]; 
   size_t jsonSize = serializeJson(doc, responseBuffer, sizeof(responseBuffer));
