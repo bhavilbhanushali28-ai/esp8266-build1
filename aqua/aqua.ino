@@ -1444,6 +1444,7 @@ void initWiFi() {
     isApModeActive = true; 
   }
 }
+/*
 void startWebServer() {
   if (serverRunning){
 #ifdef DEBUG_MODE
@@ -1668,6 +1669,253 @@ server.onNotFound([](AsyncWebServerRequest *request) {
     request->send(404, "text/plain", "Not found");
   }
 });
+  server.begin();
+  serverRunning = true;
+#ifdef DEBUG_MODE
+  Serial.println(F("Web server started."));
+#endif
+}
+*/
+void startWebServer() {
+  if (serverRunning) {
+#ifdef DEBUG_MODE
+    Serial.println(F("Web server handlers already attached. Skipping start."));
+#endif
+    return;
+  }
+
+  if (ESP.getFreeHeap() < 12000) {
+    Serial.println(F("Insufficient heap for web server!"));
+    Serial.printf("Free heap: %u\n", ESP.getFreeHeap());
+    return;
+  }
+
+  Serial.printf("Starting web server. Free heap: %u\n", ESP.getFreeHeap());
+
+  server.on("/login", HTTP_POST, handleLogin);
+  server.on("/updateLogin", HTTP_POST, handleUpdateLogin);
+  server.on("/relay", HTTP_POST, handleRelayControl);
+  server.on("/emergencyStop", HTTP_POST, handleEmergencyStop);
+  server.on("/scan", HTTP_GET, handleScanNetworks);
+  server.on("/knownNetworks", HTTP_GET, handleKnownNetworks);
+  server.on("/saveKnownNetworks", HTTP_POST, handleSaveKnownNetworks);
+  server.on("/clearKnownNetworks", HTTP_POST, handleClearKnownNetworks);
+  server.on("/apModeToggle", HTTP_POST, handleAPModeToggle);
+  server.on("/restart", HTTP_POST, handleRestart);
+  server.on("/restoreFactorySettings", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!isLoggedIn(request)) {
+      request->send(403, "text/plain", "Forbidden");
+      return;
+    }
+    handleRestoreFactorySettings(request);
+  });
+  server.on("/failsafeLogs", HTTP_GET, handleFailsafeLogs);
+  server.on("/relayLogs", HTTP_GET, handleRelayLogs);
+  server.on("/clearFailsafeLogs", HTTP_POST, handleClearFailsafeLogs);
+  server.on("/clearRelayLogs", HTTP_POST, handleClearRelayLogs);
+  server.on("/updateWifi", HTTP_POST, handleUpdateWifi);
+  server.on("/disconnectWifi", HTTP_POST, handleDisconnectWifi);
+  server.on("/setDeepSleepDuration", HTTP_POST, handleSetDeepSleepDuration);
+  server.on("/deepSleep", HTTP_POST, handleDeepSleep);
+
+  server.onFileUpload(handleFileUpload);
+  server.on("/upload", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/html",
+      "<form method='POST' action='/upload' enctype='multipart/form-data'>"
+      "<input type='file' name='upload'>"
+      "<input type='submit' value='Upload'>"
+      "</form>");
+  });
+  server.on("/upload", HTTP_POST, [](AsyncWebServerRequest *request){}, handleFileUpload);
+
+  server.on("/files", HTTP_GET, [](AsyncWebServerRequest *request) {
+    Dir dir = LittleFS.openDir("/");
+    String html = "<h3>Files in LittleFS:</h3><ul>";
+    while (dir.next()) {
+      html += "<li>" + dir.fileName() + " (" + String(dir.fileSize()) + " bytes)</li>";
+    }
+    html += "</ul>";
+    request->send(200, "text/html", html);
+  });
+
+  server.on("/format", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!isLoggedIn(request)) {
+      request->send(403, "text/plain", "Forbidden");
+      return;
+    }
+    handleFormatFS(request);
+  });
+
+  server.on("/status", HTTP_GET, handleStatus);
+  server.on("/settings", HTTP_GET, handleGetSettings);
+
+  server.addHandler(new AsyncCallbackJsonWebHandler("/saveSettings", [](AsyncWebServerRequest *request, JsonVariant &json) {
+    if (!isLoggedIn(request)) {
+      request->send(403, "text/plain", "Forbidden");
+      return;
+    }
+    StaticJsonDocument<SETTINGS_DOC_CAPACITY> doc;
+    doc.set(json);
+    Serial.println(F("Received settings JSON:"));
+    serializeJsonPretty(doc, Serial);
+    Serial.println();
+
+    // Hostname
+    const char* newHost = doc["hostname"] | "aquamaster";
+    strncpy(settings.hostname, newHost, sizeof(settings.hostname) - 1);
+    settings.hostname[sizeof(settings.hostname) - 1] = '\0';
+
+    // WiFi STA â€” only update password if non-empty
+    const char* staSsid = doc["staSsid"] | "";
+    strncpy(settings.staSsid, staSsid, sizeof(settings.staSsid) - 1);
+    settings.staSsid[sizeof(settings.staSsid) - 1] = '\0';
+    const char* staPass = doc["staPassword"] | "";
+    if (strlen(staPass) > 0) {
+      strncpy(settings.staPassword, staPass, sizeof(settings.staPassword) - 1);
+      settings.staPassword[sizeof(settings.staPassword) - 1] = '\0';
+    }
+
+    // Network
+    settings.useDHCP = doc["useDHCP"] | true;
+    IPAddress ip;
+    if (ip.fromString(doc["staticIp"] | "192.168.1.100")) settings.staticIp = ip;
+    if (ip.fromString(doc["staticGateway"] | "192.168.1.1")) settings.staticGateway = ip;
+    if (ip.fromString(doc["staticDns1"] | "8.8.8.8")) settings.staticDns1 = ip;
+    if (ip.fromString(doc["staticDns2"] | "8.8.4.4")) settings.staticDns2 = ip;
+    settings.staticSubnet = IPAddress(255, 255, 255, 0);
+
+    // AP
+    settings.wifiAPModeEnabled = doc["wifiAPModeEnabled"] | false;
+    const char* apSsid = doc["apSsid"] | "AquaMaster_AP";
+    const char* apPass = doc["apPassword"] | "aquapass";
+    strncpy(settings.apSsid, apSsid, sizeof(settings.apSsid) - 1);
+    settings.apSsid[sizeof(settings.apSsid) - 1] = '\0';
+    strncpy(settings.apPassword, apPass, sizeof(settings.apPassword) - 1);
+    settings.apPassword[sizeof(settings.apPassword) - 1] = '\0';
+
+    // Misc
+    settings.calibrationFactor = doc["calibrationFactor"] | 1.0;
+    settings.failsafeDurationHours = doc["failsafeDurationHours"] | 12;
+    settings.failsafeEnabled = doc["failsafeEnabled"] | true;
+    settings.failsafePin = doc["failsafePin"] | D5;
+    settings.relayPin = doc["relayPin"] | D1;
+
+    // Default relay duration
+    if (doc.containsKey("defaultRelayDuration")) {
+      if (doc["defaultRelayDuration"].is<int>()) {
+        settings.defaultRelayDuration = doc["defaultRelayDuration"];
+      } else if (doc["defaultRelayDuration"].is<const char*>()) {
+        settings.defaultRelayDuration = atoi(doc["defaultRelayDuration"]);
+      } else {
+        Serial.println(F("Invalid type for defaultRelayDuration"));
+      }
+      Serial.printf("defaultRelayDuration = %d\n", settings.defaultRelayDuration);
+    }
+
+    // Max relay runtime
+    if (doc.containsKey("maxRelayRuntime")) {
+      if (doc["maxRelayRuntime"].is<int>()) {
+        settings.maxRelayRuntime = doc["maxRelayRuntime"];
+      } else if (doc["maxRelayRuntime"].is<const char*>()) {
+        settings.maxRelayRuntime = atoi(doc["maxRelayRuntime"]);
+      } else {
+        Serial.println(F("Invalid type for maxRelayRuntime"));
+      }
+      Serial.printf("maxRelayRuntime = %d\n", settings.maxRelayRuntime);
+    }
+
+    // Switch cooldown â€” applied immediately, no reboot needed
+    if (doc.containsKey("switchCooldownSec")) {
+      if (doc["switchCooldownSec"].is<int>()) {
+        settings.switchCooldownSec = doc["switchCooldownSec"];
+      } else if (doc["switchCooldownSec"].is<const char*>()) {
+        settings.switchCooldownSec = atoi(doc["switchCooldownSec"]);
+      } else {
+        Serial.println(F("Invalid type for switchCooldownSec"));
+      }
+      SWITCH_CHANGE_COOLDOWN = settings.switchCooldownSec * 1000UL;
+      Serial.printf("switchCooldownSec = %lu, SWITCH_CHANGE_COOLDOWN = %lu ms\n",
+                    settings.switchCooldownSec, SWITCH_CHANGE_COOLDOWN);
+    }
+
+    // Deep sleep duration
+    if (doc.containsKey("deepSleepDurationSeconds")) {
+      if (doc["deepSleepDurationSeconds"].is<int>()) {
+        settings.deepSleepDurationSeconds = doc["deepSleepDurationSeconds"];
+      } else if (doc["deepSleepDurationSeconds"].is<const char*>()) {
+        settings.deepSleepDurationSeconds = atoi(doc["deepSleepDurationSeconds"]);
+      } else {
+        Serial.println(F("Invalid type for deepSleepDurationSeconds"));
+      }
+      Serial.printf("deepSleepDurationSeconds = %d\n", settings.deepSleepDurationSeconds);
+    }
+
+    settings.autoDeepSleepEnabled = doc["autoDeepSleepEnabled"] | true;
+
+    // Save â€” no pendingRestart, WiFi changes handled by handleUpdateWifi
+    if (saveSettings()) {
+      Serial.println(F("Settings saved successfully."));
+      request->send(200, "text/plain", "Settings saved successfully.");
+      broadcastStatus();
+    } else {
+      Serial.println(F("Failed to save settings to flash."));
+      request->send(500, "text/plain", "Failed to save settings.");
+    }
+  }));
+
+  server.on("/clearFailsafe", HTTP_POST, handleClearFailsafe);
+  server.on("/fs-check", HTTP_GET, handleFsCheck);
+  server.on("/autoDeepSleepToggle", HTTP_POST, handleAutoDeepSleepToggle);
+
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (LittleFS.exists("/index.html.gz")) {
+      AsyncWebServerResponse *response = request->beginResponse(LittleFS, "/index.html.gz", "text/html");
+      response->addHeader("Content-Encoding", "gzip");
+      request->send(response);
+    } else {
+      request->send(500, "text/plain", "index.html.gz not found");
+    }
+  });
+
+  events.onConnect([](AsyncEventSourceClient *client) {
+    client->send("connected", "event");
+#ifdef DEBUG_MODE
+    Serial.println(F("SSE Client Connected!"));
+#endif
+  });
+  server.addHandler(&events);
+
+  server.on("/generate_204", HTTP_ANY, [](AsyncWebServerRequest *request) {
+    request->send(204);
+  });
+  server.on("/gen_204", HTTP_ANY, [](AsyncWebServerRequest *request) {
+    request->send(204);
+  });
+  server.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->redirect("/index.html");
+  });
+  server.on("/library/test/success.html", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->redirect("/index.html");
+  });
+  server.on("/connecttest.txt", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->redirect("/index.html");
+  });
+  server.on("/redirect", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->redirect("/index.html");
+  });
+  server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(LittleFS, "/index.html.gz", "text/html");
+  });
+  server.onNotFound([](AsyncWebServerRequest *request) {
+    if (!WiFi.isConnected()) {
+      AsyncWebServerResponse *response = request->beginResponse(LittleFS, "/index.html.gz", "text/html");
+      response->addHeader("Content-Encoding", "gzip");
+      request->send(response);
+    } else {
+      request->send(404, "text/plain", "Not found");
+    }
+  });
+
   server.begin();
   serverRunning = true;
 #ifdef DEBUG_MODE
