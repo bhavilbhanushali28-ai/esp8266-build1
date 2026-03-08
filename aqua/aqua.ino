@@ -105,7 +105,7 @@ uint8_t relayLogIndex = 0;
 uint8_t failsafeLogIndex = 0;
 #define SWITCH_PIN D2
 unsigned long lastSwitchStateChangeTime = 0;
-const unsigned long SWITCH_CHANGE_COOLDOWN = 10000; 
+unsigned long SWITCH_CHANGE_COOLDOWN = 10000; // fallback default, overridden by settings
 bool lastSwitchReading = HIGH;          
 bool lastSwitchStableState = HIGH;      
 unsigned long lastSwitchDebounceTime = 0;
@@ -175,6 +175,7 @@ struct Settings {
   int relayPin;    
   unsigned long defaultRelayDuration;
   unsigned long maxRelayRuntime;
+  unsigned long switchCooldownSec;     // <-- ADD: physical switch cooldown in ms
   bool wasTimedRunInterrupted;
   unsigned int interruptedRunDuration;
   unsigned long interruptedRunStartTime;
@@ -1400,6 +1401,7 @@ void applyDefaultSettings() {
   settings.relayPin = D1; 
   settings.defaultRelayDuration = 720;
   settings.maxRelayRuntime = 960; 
+  settings.switchCooldownSec = 10;// 10 seconds default
   settings.wasTimedRunInterrupted = false;
   settings.interruptedRunDuration = 0;
   settings.interruptedRunStartTime = 0;
@@ -1963,7 +1965,8 @@ if (!lock.isLocked()) return false;
   settings.relayPin = doc["relayPin"] | D1;
   settings.defaultRelayDuration = doc["defaultRelayDuration"] | 720;
   settings.maxRelayRuntime = doc["maxRelayRuntime"] | 960;
-  settings.wasTimedRunInterrupted = doc["wasTimedRunInterrupted"] | false;
+  settings.switchCooldownSec = doc["switchCooldownSec"] | 10;
+SWITCH_CHANGE_COOLDOWN = settings.switchCooldownSec * 1000UL;settings.wasTimedRunInterrupted = doc["wasTimedRunInterrupted"] | false;
   settings.interruptedRunDuration = doc["interruptedRunDuration"] | 0;
   settings.interruptedRunStartTime = doc["interruptedRunStartTime"] | 0;
   settings.bootUnixTime = doc["bootUnixTime"] | 0;
@@ -2008,7 +2011,7 @@ if (!lock.isLocked()) return false;
   doc["relayPin"] = settings.relayPin;
   doc["defaultRelayDuration"] = settings.defaultRelayDuration;
   doc["maxRelayRuntime"] = settings.maxRelayRuntime;
-  doc["wasTimedRunInterrupted"] = settings.wasTimedRunInterrupted;
+  doc["switchCooldownSec"] = settings.switchCooldownSec;  doc["wasTimedRunInterrupted"] = settings.wasTimedRunInterrupted;
   doc["interruptedRunDuration"] = settings.interruptedRunDuration;
   doc["interruptedRunStartTime"] = settings.interruptedRunStartTime;
   doc["bootUnixTime"] = settings.bootUnixTime;
@@ -2667,7 +2670,7 @@ void handleGetSettings(AsyncWebServerRequest *request) {
   doc["relayPin"] = settings.relayPin;
   doc["defaultRelayDuration"] = settings.defaultRelayDuration;
   doc["maxRelayRuntime"] = settings.maxRelayRuntime;
-  doc["deepSleepDurationSeconds"] = settings.deepSleepDurationSeconds;
+  doc["switchCooldownSec"] = settings.switchCooldownSec;oc["deepSleepDurationSeconds"] = settings.deepSleepDurationSeconds;
   doc["autoDeepSleepEnabled"] = settings.autoDeepSleepEnabled; 
   char responseBuffer[SETTINGS_DOC_CAPACITY]; 
   size_t jsonSize = serializeJson(doc, responseBuffer, sizeof(responseBuffer));
