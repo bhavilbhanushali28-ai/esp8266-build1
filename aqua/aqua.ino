@@ -1605,7 +1605,7 @@ server.on("/files", HTTP_GET, [](AsyncWebServerRequest *request) {
       Serial.println(F("âœ… Settings saved successfully."));
       request->send(200, "text/plain", "Settings saved successfully.");
       broadcastStatus();
-      pendingRestart = true;
+      //pendingRestart = true;
     } else {
       Serial.println(F("âŒ Failed to save settings to flash."));
       request->send(500, "text/plain", "Failed to save settings.");
@@ -2794,3 +2794,4 @@ void broadcastStatus() {
     events.send(jsonBuffer, "status");
   }
 }
+
