@@ -1570,10 +1570,27 @@ server.on("/files", HTTP_GET, [](AsyncWebServerRequest *request) {
       } else {
         Serial.println(F("âš ï¸ Invalid type for maxRelayRuntime"));
       }
-      Serial.printf("âœ” maxRelayRuntime = %d\n", settings.maxRelayRuntime);
+      // OLD (line 1572-1573):
+      Serial.printf("✔ maxRelayRuntime = %d\n", settings.maxRelayRuntime);
     }
     if (doc.containsKey("deepSleepDurationSeconds")) {
-      if (doc["deepSleepDurationSeconds"].is<int>()) {
+
+// NEW — add this block between them:
+      Serial.printf("✔ maxRelayRuntime = %d\n", settings.maxRelayRuntime);
+    }
+    if (doc.containsKey("switchCooldownSec")) {
+      if (doc["switchCooldownSec"].is<int>()) {
+        settings.switchCooldownSec = doc["switchCooldownSec"];
+      } else if (doc["switchCooldownSec"].is<const char*>()) {
+        settings.switchCooldownSec = atoi(doc["switchCooldownSec"]);
+      } else {
+        Serial.println(F("⚠️ Invalid type for switchCooldownSec"));
+      }
+      SWITCH_CHANGE_COOLDOWN = settings.switchCooldownSec * 1000UL; // ← apply immediately, no reboot needed
+      Serial.printf("✔ switchCooldownSec = %lu, SWITCH_CHANGE_COOLDOWN = %lu ms\n",
+                    settings.switchCooldownSec, SWITCH_CHANGE_COOLDOWN);
+    }
+    if (doc.containsKey("deepSleepDurationSeconds")) {      if (doc["deepSleepDurationSeconds"].is<int>()) {
         settings.deepSleepDurationSeconds = doc["deepSleepDurationSeconds"];
       } else if (doc["deepSleepDurationSeconds"].is<const char*>()) {
         settings.deepSleepDurationSeconds = atoi(doc["deepSleepDurationSeconds"]);
